@@ -70,18 +70,24 @@ py vmscp.py srvcmd.sh srvcmd.sh
 py vmssh.py "chmod +x srvcmd.sh"
 ```
 
-## 为什么不用 veto 自动选图
+## veto 自动换图：srvfix v2 双补丁（已打通）
 
-veto 的自动换图**在这个环境里做不到**——「能进服」和「会换图」互斥：
+原本「能进服」和「会换图」互斥（`sv_lan 1` 能进服但不触发换图、`sv_lan 0` 换图触发但
+连接被 cookie 检查拒绝）。**srvfix v2 用两个补丁同时解决**，`srvfix.c` 就在本目录：
 
-| 配置 | 能进服 | 会换图 |
+| 补丁 | 位置 | 做法 |
 |---|---|---|
-| **`sv_lan 1`** | ✅ cookie=0 → 放行 | ❌ 预留状态不成立，换图逻辑不触发 |
-| `sv_lan 0` | ❌ 服务器 cookie 非 0、与客户端带的 `Hello :)` 不等 → 被拒 | — |
-| `sv_lan 0` + `srvfix` | ✅（NOP 绕开） | ❌（NOP 掉的正是换图那条 `map <map> reserved`） |
+| **cookie 无条件放行** | `engine.so+0x1d07b0` | 把 `je 1d2790` 改成无条件 `jmp` |
+| **换图只发生一次** | `engine.so+0x1d82f5+0x85` | 那条 `map <map> reserved` 改成 `jmp <stub>`，stub 里执行换图后清 `[CGameServer+0x288]` |
 
-srcds 的 veto 代码是**完整的**（`server.so` 里有 `Map veto`×8、`sv_mapvetopickvote_maps`、
-`sv_mapvetopickvote_phase_duration`、`initiating level transition`）——**缺的不是代码，是这对矛盾**。
+实测：`sv_lan 0` + srvfix v2 → **客户端正常进服、只连一次、无 retry**。
+
+> ⚠️ `je rel32` 是 6 字节、`jmp rel32` 只有 5 字节，**rel32 必须重算**，照抄位移会跳进
+> 指令中间（`csgo-legacy-matchmaking` 记过这个坑）。
+
+**两个诊断陷阱**（排查时浪费最多时间的地方）：
+1. `pgrep -f srcds_linux` 会匹配到执行它的 bash 自己 → 「进程在跑」是假象
+2. `setsid nohup ... &` 在 SSH 里起不住 → 必须 `tmux new-session -d`
 
 详细试错记录见 `../csgo-match-handoff.md` §6.5。
 
