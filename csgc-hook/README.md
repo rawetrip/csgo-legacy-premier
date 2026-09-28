@@ -33,7 +33,7 @@
 
 ## 两个 hook 点
 
-全部 RVA 基于 2026-09-26 的 `client.dll`（16,377,192 字节）。
+全部 RVA 基于**构建 1575** 的 `client.dll`（16,377,192 字节，已核实）。
 
 ### 1. `client.dll + 0x6323F0` —— `MyPersonaAPI.GetElevatedState()`
 
