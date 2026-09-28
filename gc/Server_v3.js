@@ -187,6 +187,16 @@ function sendProto(socket, msgType, protoName, object, steamid = 0) {
     }
 }
 
+// SOID 的 id 必须是 SteamID64，不是 accountId（见 gc-replacement/Server_v3.js 的同类注释）。
+// 事件分发层把 steamid 归一化成了 AccountId，直接当 owner_soid.id 客户端匹配不上
+// 「本地玩家自己的 SOID」（内存里是 { id: SteamID64, type: 1 }），SOCache 永远挂不上，
+// GetElevatedState() 便一路返回 "none"。
+const STEAMID64_BASE = 76561197960265728n;   // universe=1, type=1, instance=1
+function toSteamId64(id) {
+    const v = BigInt(id);
+    return v > 0xFFFFFFFFn ? v : STEAMID64_BASE + v;
+}
+
 // [新增] 构造发给客户端的 econ SO 缓存。客户端 MyPersonaAPI.GetElevatedState()
 // 读的就是这里下发的 CSOEconGameAccountClient.elevated_state（field 14）。
 // 4004 ClientWelcome 和 28 CacheSubscriptionRefresh 的响应共用这个构造。
@@ -223,7 +233,7 @@ function buildEconSOCache(steamid) {
             { typeId: 2, objectData: [personaData] }      // CSOPersonaDataPublic
         ],
         version: 1575,
-        ownerSoid: { type: 1, id: steamid }
+        ownerSoid: { type: 1, id: toSteamId64(steamid) }
     };
 }
 
@@ -622,7 +632,7 @@ events.on('CMsgClientHello', (data, socket, steamid) => {
 
     const socacheCheck = {
         version: 1575,
-        ownerSoid: { type: 1, id: steamid }
+        ownerSoid: { type: 1, id: toSteamId64(steamid) }
     };
 
     const ConnectionStatus = {

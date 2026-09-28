@@ -3,6 +3,19 @@
 自建 GC（[CSGO-GC-Replacement](https://github.com/aka3257/CSGO-GC-Replacement)）环境下，
 让 CS:GO Legacy 客户端正确显示「优先状态」的修复补丁集。
 
+> ## ⚠️ 结论已更新（2026-09-28 晚）：改 GC 就够了，客户端不用动
+>
+> **一句话：根因是 GC 把 SO 缓存的 `owner_soid.id` 发成了 accountId 而不是 SteamID64。**
+> 客户端匹配不上本地玩家自己的 SOID，**本地玩家的 SOCache 从来没挂上**
+> （host `+0xB4` 恒为 NULL），`GetElevatedState()` 于是只能返回 `"none"`。
+>
+> 修好 `owner_soid`（`gc/Server_v3.js` 里的 `toSteamId64()`）之后，native 自己就返回
+> `"elevated"` —— **`csgc.dll` 的 native hook 与 `client/party.js` 的 JS patch 都不再需要**。
+> `csgc-hook/` 下的两个 hook 已退役（代码保留可回退，见 `csgc-hook/README.md` 开头）。
+>
+> 下面凡是以「客户端 API 数据来源无法定位、只能绕过」为前提的段落，都是**当时**的结论，
+> 保留作记录 —— 现在的解法见本文的「真正的根因与解法」一节。
+
 ## 问题
 
 自建 GC 替换官方 GC 后，客户端 UI 一路按「非优先帐号」渲染：
@@ -43,6 +56,12 @@
 `MyPersonaAPI.GetElevatedState()` 仍然不返回 `elevated`。
 
 该 API 的数据来源未能最终定位，因此改为在客户端 API 层绕过。
+
+> **以上是当时的结论，已被推翻（2026-09-28 晚）。** 数据来源定位到了：就是 SO 缓存
+> 里 type 7 的对象，客户端读 `obj[+0x18] == 5`。它读不到 **不是**因为 API 走不通，
+> 而是因为 **SO 缓存根本没挂到本地玩家身上** —— `owner_soid.id` 发成了 accountId。
+> 参数字段名（snake_case / 驼峰）那次修复是对的，但只修好了一半。
+> 详见「真正的根因与解法」。
 
 ## 修复内容
 
@@ -89,6 +108,17 @@ cp gc/config.example.json <你的 gc-replacement>/config.json
 # 然后编辑 config.json：填 matchServerIp 与 accountId
 node Server_v3.js
 ```
+
+**装完先自证 `owner_soid` 对了**（这是整件事的关键）—— 把 `gc/verify-socache.js`
+放到你的 `gc-replacement/` 下（那个目录有 `./proto`），然后：
+
+```bash
+node verify-socache.js <你的 SteamID64>
+```
+
+输出的 `ownerSoid.id` 必须是**完整的 SteamID64**（`7656119…`），
+不是 accountId。如果是后者，客户端永远不会把 SO 缓存挂到本地玩家身上，
+`GetElevatedState()` 就一直是 `"none"` —— 优先 UI 全按非优先渲染。
 
 ### 客户端
 
@@ -146,7 +176,7 @@ cmp /tmp/readback.js client/party.js
 [PRIME] local-player prime predicate -> true
 ```
 
-## 关于「从根上解决」：已完成（2026-09-28）
+## 「从根上解决」的完整过程（含已被推翻的中间结论）
 
 `MyPersonaAPI.GetElevatedState()` 的调用链：
 
@@ -164,14 +194,16 @@ GetElevatedState()                      // client.dll:0x63df6e 注册的 JS API
 
 状态码到字符串的映射（跳转表 case）：
 
-| 码 | 字符串 |
-|---|---|
-| 1 | `not_identifying` |
-| 2 | `awaiting_cooldown` |
-| 3 | `account_cooldown` |
-| 4 | `eligible` |
-| 5 | `eligible_with_takeover` |
-| 6 | **`elevated`** |
+跳转表在 **RVA `0x632448`**，实测索引 0..6 依次是：
+
+| 码 | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|---|
+| 字符串 | `none` | `not_identifying` | `awaiting_cooldown` | `eligible` | `eligible_with_takeover` | **`elevated`** | `account_cooldown` |
+
+> **更正**：这里原先写的是 1..6 =
+> `not_identifying / awaiting_cooldown / account_cooldown / eligible /
+> eligible_with_takeover / elevated` —— **3~6 的顺序错了**，`5` 才是 `elevated`
+> （正因如此 `0x632300` 里 `cmp obj[+0x18], 5 ; mov eax, 5` 才自洽）。
 
 **关键在 `0x6cc520` —— 它是在 SO 缓存里按键查找条目：**
 
@@ -179,27 +211,61 @@ GetElevatedState()                      // client.dll:0x63df6e 注册的 JS API
 6cc533  mov eax, [esi + 0x10]      ; 缓存数组基址
 6cc536  mov [ebp-4], 7             ; ★ 查找 key = 7
 6cc559  cmp [eax + 0x20], 7        ; 条目 type == 7
-6cc563  cmp [eax + 0x18], 1        ; ★ 条目状态 == 1
+6cc563  cmp [eax + 0x18], 1        ; ★ 条目的标志位，必须 == 1
+6cc569  mov eax, [eax + 4]         ; 条目 -> 对象槽
+6cc56d  mov eax, [eax]             ; 槽 -> 真正的对象
 ```
+
+> ⚠️ **别把两个 `+0x18` 搞混**：`0x6cc520` 里的 `[eax+0x18]` 是**缓存条目**的标志位
+> （要求 `== 1`）；而 `0x632300` 紧接着在**返回的对象**上做的
+> `cmp [eax+0x18], 5` 是 `elevated_state`（要求 `== 5`）。
+> `0x6cc520` 返回的是 `*(entry[+4])`，即对象本身，两者是不同结构上的同偏移字段。
 
 **key = 7 正是 SO 类型里的 `CSOEconGameAccountClient`** —— 所以
 `GetElevatedState()` 的确是**从 SO 缓存读 type 7 的对象**，GC 侧这条方向从一开始就是对的。
 
-缺的是最后一步：客户端要求该条目 `[+0x18] == 1`。我们把对象下发过去了、客户端也收下了
-（不再重复请求刷新），但很可能**没有把这个条目标记成有效**，于是查找落空、状态停在默认值。
+当时以为"缺的是最后一步：客户端要求该条目 `[+0x18] == 1`，我们没把这个条目标记成有效"。
+**这个推断是错的**：`entry[+0x18]` 是客户端自己挂缓存时置的，不需要 GC 做任何事。
+真正缺的是**缓存压根没挂上**（host `+0xB4 == NULL`）。
 
-> `[+0x18]` 的确切语义**尚未确认** —— 上面"条目状态"是我的推断，没有别的佐证。
-> 也可能是别的标志位。继续查的方向：看谁往 `[+0x18]` 写 1。
+> **更正（2026-09-28 晚）**：缓存挂上之后 `entry[+0x18] == 1` 与 `obj[+0x18] == 5`
+> **本来就是满足的**（实测 `type 7 / flag=1 / obj[+0x18]=5`），所以那条
+> "看谁往 `[+0x18]` 写 1"的线索是死路。`peek_socache.py` 可直接读出这一行来。
 
 **两条路**（当时的判断）：
 1. 补上"让条目变为有效"的那一步（若它由 GC 侧的某个消息驱动，就能真正从 GC 生效）
 2. 或者 csgc.dll hook `0x632300` / `0x6cc520`，直接返回 `elevated`
 
-### 已完成的解法
+**结果：第 1 条才对**，而且障碍比预想的小得多 —— 不是"条目有效性"，是 `owner_soid` 写错了。
 
-第 2 条走通了，但突破点不是当初设想的 `0x632300` —— 它有个 `cmp eax, 5`
+### ★ 真正的根因与解法（2026-09-28 晚）
+
+`gc/Server_v3.js` 的 `getMSGdata()` 把帧头里的 SteamID64 截成了 accountId
+（`steamId & 0xFFFFFFFFn`）再交给**所有**事件处理器，`buildEconSOCache()` 于是把它
+当成 `ownerSoid.id` 下发。而客户端拿 `owner_soid` 去匹配**本地玩家自己的 SOID** ——
+那个值（`[client.dll+0x52A92F8]` 宿主对象的 `+0x08`）实测是
+`{ id: <你的 SteamID64>, type: 1 }`，是带 `0x01100001` 高位的 64 位数。
+**id 少了高 32 位 → 匹配不上 → 本地玩家的 SOCache 从来没挂上。**
+
+修法：加一个幂等的 `toSteamId64(id)`，`ownerSoid.id` 走它（共 3 处）。
+
+修完后实测：`[host+0xB4]` 从 `NULL` 变成有效指针，条目达到
+`type 7 / flag=1 / obj[+0x18]=5`，**native `GetElevatedState()` 自己就返回 `"elevated"`**
+—— 不需要任何客户端 hook、不需要改 `code.pbin`。
+
+反证：csgc 日志里 `[GC] SendMessage: type=0x8000238F, ..., steamId=<你的 SteamID64>`
+—— SteamID64 本来就在帧头里，是 GC 自己丢掉的高位。
+
+### 已退役的解法（历史，保留可回退）
+
+第 2 条当时也走通了，但突破点不是当初设想的 `0x632300` —— 它有个 `cmp eax, 5`
 的第二调用者 `0x59cf05`，动不得。真正的入口是它的姊妹函数 **`+0x6323F0`**：
 全二进制**唯一调用者 `0x643de9`**，正是 `GetElevatedState` 的 JS 包装。
+
+> **状态：已退役。** 修好 `owner_soid` 后 native 自己就对，这两个 hook 的返回值与 native
+> 完全一致（纯冗余，还会掩盖 GC 侧将来的回归），已从 `InstallSteamHooks()` 里摘掉
+> —— `csgc-src/src/steam_hook_lite.cpp` 里 `kEnableNativePrimeHook = false`，
+> 代码保留，改成 `true` 重新编译即可回退。
 
 | 目标 | RVA | 做法 |
 |---|---|---|

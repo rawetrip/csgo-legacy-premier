@@ -1,5 +1,21 @@
 # csgc.dll 侧的 native Prime 修复
 
+> ## ⚠️ 已退役（2026-09-28 晚）—— 先看这段再往下读
+>
+> **这份文档的核心结论「native 本来就返回 `none`、与 GC 下发的 SO 缓存无关」是错的。**
+> 真正的根因在 GC 侧：`Server_v3.js` 把 SO 缓存的 `owner_soid.id` 发成了 accountId
+> 而不是 SteamID64，客户端匹配不上本地玩家自己的 SOID，**本地玩家的 SOCache 从来没挂上**
+> （host `+0xB4` 恒为 NULL），native 才只能返回 `"none"`。
+>
+> 修好 `owner_soid` 后，native `GetElevatedState()` 自己就返回 `"elevated"`，
+> 本地玩家 Prime 判定也自己返回 `true` —— **这两个 hook 的返回值和 native 完全一致，
+> 属于纯冗余**，只会掩盖 GC 侧将来的回归。因此已从 `InstallSteamHooks()` 里摘掉
+> （`kEnableNativePrimeHook = false`，代码保留可回退），重新编译后二进制里已无这两个 hook。
+>
+> **下面关于 RVA / 调用链 / funchook 坑的内容仍然有效**，是值得留的逆向结论；
+> 但凡是说「必须 hook 客户端才能修好 Prime」的地方，都已被推翻。
+> 现状以 `csgo-prime-handoff.md` 为准。
+
 > 2026-09-28 完成。这一层让「优先状态」在**原生层**生效，
 > 从此不再需要在 `code.pbin` 里 patch `party.js`。
 
@@ -40,9 +56,14 @@ GetElevatedState()                // client.dll:0x63df6e 注册的 JS API
 632400  jmp  dword ptr [eax*4 + 0x10632448]
 ```
 
-跳转表 1..6 依次映射到
-`not_identifying` / `awaiting_cooldown` / `account_cooldown` /
-`eligible` / `eligible_with_takeover` / **`elevated`**。
+跳转表在 **RVA `0x632448`**，索引 0..6 实测依次映射到
+`none` / `not_identifying` / `awaiting_cooldown` / `eligible` /
+`eligible_with_takeover` / **`elevated`** / `account_cooldown`。
+
+> **更正**：这里原先写的是 1..6 =
+> `not_identifying / awaiting_cooldown / account_cooldown / eligible /
+> eligible_with_takeover / elevated` —— **3~6 的顺序错了**。实测 **`5` 才是 `elevated`**
+> （所以 `0x632300` 里 `cmp obj[+0x18], 5 ; mov eax, 5` 是自洽的）。
 
 **客户端完整支持状态码 6**（表里就有那一格和对应字符串常量），
 所以直接返回 6 对应的字符串是表内合法值，不会越界。
@@ -149,15 +170,19 @@ void InstallSteamHooks()
 [PRIME] local-player prime hook installed (client.dll+0x632370)
 ```
 
-进入 UI 触发 JS 调用后，会看到决定性的那一行：
+进入 UI 触发 JS 调用后，会看到那一行：
 
 ```
 [PRIME] GetElevatedState: "none" -> "elevated"
 [PRIME] local-player prime predicate -> true
 ```
 
-`"none" -> "elevated"` 里的 `"none"` 是 **native 的真实返回值** ——
-这正是「自制 GC 环境下优先状态全错」的直接原因。
+`"none" -> "elevated"` 里的 `"none"` 是 **native 的真实返回值** —— 当时以为
+「这就是根因、native 路径本身走不通」。**错了**：`"none"` 只是症状，根因是 GC 下发的
+`owner_soid` 写错、SO 缓存从未挂上（见文件开头的退役说明）。
+
+**（已退役，保留作参考）** 注意这条 hook 只在「native 值 ≠ `elevated`」时才打印，
+所以修好 `owner_soid` 之后**日志反而会变安静** —— 一句话都不打才是好消息。
 
 ## 安全性
 
