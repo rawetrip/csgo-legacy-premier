@@ -1,0 +1,13 @@
+{
+  "host": "0.0.0.0",
+  "port": 3257,
+  "PlayerData": "./playerData",
+  "protoPath": "./proto",
+  "devmode": false,
+  "serverVersion": "13881",
+  "serverIp": "0.0.0.0",
+  "matchServerIp": "127.0.0.1",
+  "matchServerPort": 27015,
+  "matchMap": "de_cache",
+  "accountId": 0
+}
