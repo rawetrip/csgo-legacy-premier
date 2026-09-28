@@ -163,59 +163,136 @@ static int try_patch(void)
     uintptr_t target = (uintptr_t)(site + 7) + rel;      /* = 1e7150 */
     fprintf(stderr, "[srvfix] call 目标 %p\n", (void *)target);
 
-    /* --- 分配 stub ---------------------------------------------------- */
-    unsigned char *stub = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (stub == MAP_FAILED) {
-        perror("[srvfix] mmap stub 失败");
-        return 1;
-    }
-
-    unsigned char *w = stub;
+    /* --- 选哪种打法：默认 NOP，SRVFIX_DETOUR=1 才用 detour 桩 -------------
+     *
+     * 默认（NOP）—— 这是 v1 的行为，2026-09-28 晚实测后改回来做默认：
+     *   引擎那条 "map <map> reserved" 会**从非主线程触发关卡重载**，主循环回不来，
+     *   被自家看门狗掐掉（退出码 134）。两轮实测都卡死在 `Created class baseline`
+     *   之后：
+     *     GameTypes: could not find matching game mode value of "reserved"
+     *     ... Created class baseline: 27 classes, 15021 bytes.
+     *     **** WARNING: Watchdog timer exceeded, aborting!
+     *   NOP 掉这条 call 之后，`nextlevel X` 与后面的 Cbuf_Execute 都保留，
+     *   只是引擎不再自己立刻重载关卡。换图改由外部通道补：
+     *   veto_map.txt / server_map.txt -> GC 轮询 -> srvcmd.sh(TIOCSTI) -> changelevel。
+     *
+     * detour（需要 SRVFIX_DETOUR=1）—— v2 原设计：执行换图 + 清 [CGameServer+0x288]。
+     *   它能让引擎原生换图，但会踩上面那个看门狗。保留是为了对比和将来排查。
+     * ------------------------------------------------------------------- */
+    int use_detour = getenv("SRVFIX_DETOUR") != NULL;
+    unsigned char patch[7];
     int32_t d;
 
-    /* push $2 */
-    *w++ = 0x6A; *w++ = 0x02;
+    if (use_detour) {
+        /* --- 分配 stub ------------------------------------------------- */
+        unsigned char *stub = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (stub == MAP_FAILED) {
+            perror("[srvfix] mmap stub 失败");
+            return 1;
+        }
+        unsigned char *w = stub;
 
-    /* call <target>  —— e8 rel32，rel 相对下一条指令（= stub+7） */
-    *w++ = 0xE8;
-    d = (int32_t)((intptr_t)target - (intptr_t)(w + 4));
-    memcpy(w, &d, 4); w += 4;
+        /* push $2 */
+        *w++ = 0x6A; *w++ = 0x02;
 
-    /* mov byte ptr [ebx+0x288], 0   —— c6 83 88 02 00 00 00 */
-    *w++ = 0xC6; *w++ = 0x83;
-    *w++ = 0x88; *w++ = 0x02; *w++ = 0x00; *w++ = 0x00;
-    *w++ = 0x00;
+        /* call <target> —— e8 rel32，rel 相对下一条指令（= stub+7） */
+        *w++ = 0xE8;
+        d = (int32_t)((intptr_t)target - (intptr_t)(w + 4));
+        memcpy(w, &d, 4); w += 4;
 
-    /* jmp <site+7>  —— e9 rel32 */
-    *w++ = 0xE9;
-    d = (int32_t)((intptr_t)(site + 7) - (intptr_t)(w + 4));
-    memcpy(w, &d, 4); w += 4;
+        /* mov byte ptr [ebx+0x288], 0 —— c6 83 88 02 00 00 00 */
+        *w++ = 0xC6; *w++ = 0x83;
+        *w++ = 0x88; *w++ = 0x02; *w++ = 0x00; *w++ = 0x00;
+        *w++ = 0x00;
 
-    fprintf(stderr, "[srvfix] stub 位于 %p（%ld 字节）\n",
-            (void *)stub, (long)(w - stub));
-    __builtin___clear_cache((char *)stub, (char *)w);
+        /* jmp <site+7> —— e9 rel32 */
+        *w++ = 0xE9;
+        d = (int32_t)((intptr_t)(site + 7) - (intptr_t)(w + 4));
+        memcpy(w, &d, 4); w += 4;
 
-    /* --- 把 site 处改成 jmp stub -------------------------------------- */
-    if (make_writable(site, 7) != 0) {
-        perror("[srvfix] mprotect(site) 失败");
-        return 1;
+        fprintf(stderr, "[srvfix] stub 位于 %p（%ld 字节）\n",
+                (void *)stub, (long)(w - stub));
+        __builtin___clear_cache((char *)stub, (char *)w);
+
+        /* ★ 必须显式把 stub 页设成可执行：mmap(PROT_READ|PROT_WRITE) 出来的页在现代
+         * 内核上是 NX 的，跳进去直接 SIGSEGV，特征是「执行地址 == 出错地址」：
+         *     segfault at f3231000 ip 00000000f3231000 error 15
+         * 失败时放弃打补丁，宁可不换图也不能让服务器在玩家连入时崩。 */
+        if (mprotect(stub, 4096, PROT_READ | PROT_EXEC) != 0) {
+            perror("[srvfix] mprotect(stub) 失败 —— stub 不可执行，放弃打补丁");
+            return 1;
+        }
+
+        if (make_writable(site, 7) != 0) {
+            perror("[srvfix] mprotect(site) 失败");
+            return 1;
+        }
+        patch[0] = 0xE9;                                /* jmp rel32 */
+        d = (int32_t)((intptr_t)stub - (intptr_t)(site + 5));
+        memcpy(patch + 1, &d, 4);
+        patch[5] = 0x90; patch[6] = 0x90;
+        memcpy(site, patch, sizeof(patch));
+        fprintf(stderr,
+                "[srvfix] 已打补丁（detour）：%p 处改为跳桩 → 执行 map <map> reserved，"
+                "再清 [CGameServer+0x288]\n", (void *)je);
+    } else {
+        if (make_writable(site, 7) != 0) {
+            perror("[srvfix] mprotect(site) 失败");
+            return 1;
+        }
+        /* 6A 02 90 90 90 90 90 —— 保留 push $2（它是后面 Cbuf_Execute 的参数，
+         * 栈保持平衡），只 NOP 掉那条 call。 */
+        patch[0] = 0x6A; patch[1] = 0x02;
+        patch[2] = 0x90; patch[3] = 0x90; patch[4] = 0x90;
+        patch[5] = 0x90; patch[6] = 0x90;
+        memcpy(site, patch, sizeof(patch));
+        fprintf(stderr,
+                "[srvfix] 已打补丁（NOP）：%p 处不执行引擎自带的 map <map> reserved "
+                "（那条会从非主线程重载关卡并卡死看门狗）；换图走外部通道\n", (void *)je);
     }
-
-    unsigned char patch[7];
-    patch[0] = 0xE9;                                    /* jmp rel32 */
-    d = (int32_t)((intptr_t)stub - (intptr_t)(site + 5));
-    memcpy(patch + 1, &d, 4);
-    patch[5] = 0x90; patch[6] = 0x90;                   /* 补齐 7 字节 */
-
-    memcpy(site, patch, sizeof(patch));
 
     if (make_exec_only(site, 7) != 0)
         perror("[srvfix] 恢复 site 保护属性失败");
 
-    fprintf(stderr,
-            "[srvfix] 已打补丁：%p 处改为 detour → 先执行 map <map> reserved，"
-            "再清 [CGameServer+0x288]（换图只发生一次）\n", (void *)je);
+    /* ── 补丁 2b：不要在这里立刻 flush 命令缓冲 ─────────────────────────────
+     *
+     * objdump 出来的真实指令序列（engine.so，Addr == Off）：
+     *
+     *   1d8379  push %esi
+     *   1d837a  push $0x2                 ← site，我们的桩替换的 7 字节从这里开始
+     *   1d837c  call 1e7150               ; 入队 "map <map> reserved"
+     *   1d8381  add  $0x10,%esp
+     *   1d8384  call 1e8090               ← ★ Cbuf_Execute
+     *   1d8389  jmp  1d7feb               ; 跳出整块
+     *
+     * 那两条命令（nextlevel X / map X reserved）**已经入队**（1e7150 那个调用）。
+     * 这条 Cbuf_Execute 只是"立刻执行"，而它是**从非主线程**调的 —— 关卡重载要的锁
+     * 被主循环占着 → 死锁 → 看门狗掐死。实测症状就是日志停在
+     *   Created class baseline: 27 classes, 15021 bytes.
+     *   **** WARNING: Watchdog timer exceeded, aborting!      (退出码 134)
+     *
+     * 把它 NOP 掉：命令留在缓冲里，主循环稍后自己 flush —— 重载照样发生，但由主线程做。
+     * ─────────────────────────────────────────────────────────────────── */
+    unsigned char *cbuf_exec = site + 0x0A;
+    if (cbuf_exec[0] == 0xE8) {
+        if (make_writable(cbuf_exec, 5) == 0) {
+            unsigned char nop5[5] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
+            memcpy(cbuf_exec, nop5, 5);
+            make_exec_only(cbuf_exec, 5);
+            fprintf(stderr,
+                    "[srvfix] 已打补丁（2b）：%p 处 Cbuf_Execute 改为 NOP —— "
+                    "换图命令交由主循环 flush，避免非主线程重载关卡死锁\n",
+                    (void *)cbuf_exec);
+        } else {
+            perror("[srvfix] mprotect(Cbuf_Execute) 失败");
+        }
+    } else {
+        fprintf(stderr,
+                "[srvfix] 警告：%p 处不是 call（%02x），跳过 Cbuf_Execute 补丁\n",
+                (void *)cbuf_exec, cbuf_exec[0]);
+    }
+
     return 1;
 }
 
@@ -312,12 +389,69 @@ static int try_patch_cookie(void)
     return 1;
 }
 
+/* ── 补丁 3：抹掉引擎自带的无效游戏模式名 "reserved" ───────────────────────
+ *
+ * 引擎在「已预留 → 直接开局」里拼的命令是 `map <地图> reserved`，第三个参数被当成
+ * **游戏模式**去 gametypes 里查，而服务器没有叫 reserved 的模式：
+ *
+ *   GameTypes: could not find matching game mode value of "reserved" in any game type.
+ *
+ * 查不到 → 模式初始化不了 → 紧接着就是
+ *   **** WARNING: Watchdog timer exceeded, aborting!        (退出码 134)
+ *
+ * 把格式串里的 "reserved" 抹成 8 个空格（**长度不变**，不用挪任何代码）：
+ *
+ *   engine.so 0x50cc3c:  "map %s reserved\n"  ->  "map %s         \n"
+ *
+ * 拼出来就是 `map de_cache` —— 和服务器启动参数里的 `+map de_cache` 同一种形式，
+ * 已知可用。（尾部多几个空格，命令解析按空白分词，无影响。）
+ *
+ * 不直接改 engine.so 文件，仍走 LD_PRELOAD —— 保持"不碰游戏文件"这条性质。
+ */
+static const unsigned char MAPFMT[16] = {
+    'm','a','p',' ','%','s',' ','r','e','s','e','r','v','e','d','\n'
+};
+static const unsigned char MAPFMT_NEW[16] = {
+    'm','a','p',' ','%','s',' ',' ',' ',' ',' ',' ',' ',' ',' ','\n'
+};
+
+static int mapfmt_patched;
+
+static int try_patch_mapfmt(void)
+{
+    if (mapfmt_patched) return 1;
+    if (!g_lo) return 0;
+
+    for (uintptr_t a = g_lo; a + sizeof(MAPFMT) <= g_hi; a++) {
+        if (memcmp((const void *)a, MAPFMT, sizeof(MAPFMT)) != 0) continue;
+
+        if (make_writable((void *)a, sizeof(MAPFMT)) != 0) {
+            perror("[srvfix] mprotect(map 格式串) 失败");
+            mapfmt_patched = 1;
+            return 1;
+        }
+        memcpy((void *)a, MAPFMT_NEW, sizeof(MAPFMT));
+        make_exec_only((void *)a, sizeof(MAPFMT));
+
+        mapfmt_patched = 1;
+        fprintf(stderr,
+                "[srvfix] 已打补丁（3）：%p 处 \"map %%s reserved\" 改为 \"map %%s\" "
+                "—— 去掉不存在的游戏模式 reserved（它导致 GameTypes 查不到模式，随后看门狗 abort）\n",
+                (void *)a);
+        return 1;
+    }
+    fprintf(stderr, "[srvfix] 警告：没找到 \"map %%s reserved\" 格式串，跳过补丁 3\n");
+    mapfmt_patched = 1;
+    return 1;
+}
+
 static void *worker(void *arg)
 {
     (void)arg;
     for (int i = 0; i < 1200; i++) {        /* 最多 120 秒 */
         if (try_patch()) {
             try_patch_cookie();
+            try_patch_mapfmt();          /* 补丁 3：抹掉无效模式名 reserved */
             if (cookie_patched) { g_done = 1; return NULL; }
         }
         usleep(100 * 1000);
@@ -333,7 +467,8 @@ static void srvfix_init(void)
         fprintf(stderr, "[srvfix] SRVFIX_OFF 已设置，跳过\n");
         return;
     }
-    fprintf(stderr, "[srvfix] 已注入（v2 detour 版），等引擎加载..\n");
+    fprintf(stderr, "[srvfix] 已注入（v3：cookie 放行 + 默认 NOP 掉引擎自带换图；"
+                    "SRVFIX_DETOUR=1 可切回 detour 桩），等引擎加载..\n");
 
     pthread_t t;
     if (pthread_create(&t, NULL, worker, NULL) != 0) {
