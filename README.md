@@ -118,13 +118,41 @@ cmp /tmp/readback.js client/party.js
 
 如果打印的是 `patch FAILED`，说明 native API 对象是只读的，需要改为直接修改调用点。
 
-## 未解决
+## 关于「从根上解决」：已确认此路不通
 
-- **`MyPersonaAPI.GetElevatedState()` 的数据来源未能最终定位。**
-  SO 缓存这个方向是对的（`CsgoWelcome` 的字段构成 —— `bonus_xp_usedflags` /
-  `elevated_state` / `items` —— 指向 `CSOEconGameAccountClient` + 库存），
-  但客户端收下数据后没有据此更新状态。若将来要回到「从根上解决」，
-  可以从客户端接受 SO 缓存的时机、version 校验、或 owner_soid 匹配入手。
+`MyPersonaAPI.GetElevatedState()` 的数据来源**已经逆向到底**，结论是**无法通过 GC 满足**：
+
+```
+GetElevatedState()                      // client.dll:0x63df6e 注册的 JS API
+  -> 0x643de0                           // JS 包装：把状态字符串转成 JS 返回值
+  -> 0x6323f0                           // 状态码 -> 字符串（jmp 跳转表）
+  -> 0x632300                           // 计算状态码
+       mov ecx, [0x152a92f8]            // <- 客户端进程内的全局对象
+       mov ecx, [ecx + 0xb4]            //    取其成员
+       call 0x6cc520                    //    getter
+       cmp [eax + 0x18], 5
+       ...
+```
+
+状态码到字符串的映射（跳转表 case）：
+
+| 码 | 字符串 |
+|---|---|
+| 1 | `not_identifying` |
+| 2 | `awaiting_cooldown` |
+| 3 | `account_cooldown` |
+| 4 | `eligible` |
+| 5 | `eligible_with_takeover` |
+| 6 | **`elevated`** |
+
+关键在于：它读的是**客户端进程内的全局对象**（`0x152a92f8`，整个二进制里有 92 处引用），
+**不是任何一条 GC 消息**。也就是说，即使 GC 把 SO 缓存下得完全正确，也不会影响这个值 ——
+这解释了为什么「数据送达、客户端收下、但状态不变」。
+
+**所以客户端侧的 API patch 不是权宜之计，而是当前唯一可行的路径。**
+
+（附带发现：`0x632300` 里有一条 `-perfectworld` / `-forceperfectworld` 分支 ——
+中国版客户端的 elevated 判定走的是另一套逻辑。若将来要处理中国版，需另做分析。）
 - **弹窗的每秒 beep 未实现**。官方逻辑是「倒计时在走且没人按接受」时每秒播
   `popup_accept_match_beep`；而 `@` 公告式路径会把 `m_hasPressedAccept` 置真，
   两者互斥 —— 复刻 beep 就得放弃官方精简形态与关闭路径，判定不值得做。
