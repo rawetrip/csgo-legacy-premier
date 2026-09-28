@@ -223,6 +223,17 @@ GetElevatedState()                      // client.dll:0x63df6e 注册的 JS API
 **完整分析、代码与集成步骤见 [`csgc-hook/`](csgc-hook/)。** 采用之后
 `client/party.js` 保持原样即可，`code.pbin` 不再需要任何修改。
 
+## 选图 → 游戏服务器切图
+
+优先级状态修好之后，还差一环：**在比赛设置里选的图，要真的落到游戏服务器上**。
+
+客户端选图的信息**不会**传给 GC（9101 的 proto 里没有地图字段、`lobby_id` 恒为 0、
+lobby API 从未被调用），UI 侧那条链又全程是 V8，native 层没有切入点。所以改用
+**外部指定**：往 `server_map.txt` 写地图名，GC 轮询到就让 srcds 切图，客户端会自动跟随。
+
+**完整说明、`srvcmd.sh` 和两个实测踩过的坑（`echo > /dev/pts/N` 不是发送命令、
+veto 自动换图为何做不到）见 [`map-sync/`](map-sync/)。**
+
 （附带发现：`0x632300` 里有一条 `-perfectworld` / `-forceperfectworld` 分支 ——
 中国版客户端的 elevated 判定走的是另一套逻辑。若将来要处理中国版，需另做分析。）
 - **弹窗的每秒 beep 未实现**。官方逻辑是「倒计时在走且没人按接受」时每秒播
