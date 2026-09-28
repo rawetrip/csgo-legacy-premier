@@ -28,7 +28,7 @@ when running a custom Game Coordinator
 | Dimension | Scope |
 |---|---|
 | **Server** | **Linux `srcds` only.** `map-sync/srvfix.c` hardcodes offsets into `engine.so` (32-bit ELF); Windows is not applicable |
-| **Client build** | The **Operation Broken Fang** build |
+| **Client build** | Build **1575** (`ClientVersion 1575` / `PatchVersion 1.38.8.1` / 2023-10-12) — the **final legacy CS:GO client** |
 | **Mode** | ★ **Only the Prime queue is implemented. Competitive/casual and other modes are not** |
 | Hardcoded offsets | Based on the 2026-09-26 build (CS:GO is frozen, so this build is stable; other branches/regional builds need re-locating) |
 
