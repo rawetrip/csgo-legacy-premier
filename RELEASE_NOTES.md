@@ -73,6 +73,10 @@
 - `gc/Server_v3.js` 同步到完整流程版本，并**脱敏**
   （作者 SteamID64 / accountId / 主机 IP / 游戏服 SteamID 全为占位符；
   顺带修掉旧版里已经公开的真实游戏服 SteamID）。
+  本机路径与 Windows 用户名也已提出 —— 改为 `config.json` 的 `csgoDir` / `vmSshPath`，
+  两项留空则外部换图通道不启用（默认）。
+  另删掉 `matchMap`：它经 `MATCH_MAP` → `g_serverMap` 传递，而 `g_serverMap` 只赋值从不读取，
+  9106/9107 的 map 字段实际用常量 `LOBBY_MAPVETO`，是死配置。
 - `map-sync/README.md` 加过时横幅 + 把 srvfix 描述从「v2 双补丁」更正为「v3 五补丁」。
 
 ---

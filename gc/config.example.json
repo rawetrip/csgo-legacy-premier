@@ -8,6 +8,9 @@
   "serverIp": "0.0.0.0",
   "matchServerIp": "127.0.0.1",
   "matchServerPort": 27015,
-  "matchMap": "de_cache",
+
+  "csgoDir": "",
+  "vmSshPath": "",
+
   "accountId": 0
 }
