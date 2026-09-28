@@ -56,7 +56,13 @@
 | `CMsgGCCStrike15_v2_MatchmakingStart` handler | 解析并记录客户端上报的 `prime_only`（原来直接丢弃） |
 | `CMsgGCCStrike15_v2_MatchmakingStop` 的 9104 | 去掉 `notes:[{ prime: true }]`（proto 的 `Note` 没有这个字段），改为 `[{}]` |
 
-### 客户端侧 —— `client/party.js`
+### 客户端侧 —— 两种方案，二选一
+
+**方案 A（推荐）：[`csgc-hook/`](csgc-hook/) 的 native 修复**
+
+csgc.dll 直接 hook `client.dll` 的两个函数，**不改任何游戏文件**。
+
+**方案 B（旧）：`client/party.js` 的 JS patch**
 
 Monkey patch 三个 native API，**只对本地玩家**返回优先：
 
@@ -70,6 +76,9 @@ Monkey patch 三个 native API，**只对本地玩家**返回优先：
 
 好友的 Prime 状态保持真实，不会被误标成优先。
 
+> ⚠️ 两个方案**不要同时用**。JS patch 会在 JS 层把 native 函数整个替换掉，
+> 于是 csgc 的 hook 永远不会被调用 —— 装上了也看不到任何日志。
+
 ## 使用
 
 ### GC
@@ -82,6 +91,15 @@ node Server_v3.js
 ```
 
 ### 客户端
+
+**方案 A：csgc.dll 的 native 修复（推荐）**
+
+把 [`csgc-hook/prime_hook.cpp`](csgc-hook/prime_hook.cpp) 合进
+`csgc-src/src/steam_hook_lite.cpp`，重新构建并部署 `csgc.dll`。
+完整步骤（含两处必要的改动）见 [`csgc-hook/README.md`](csgc-hook/README.md)。
+**`code.pbin` 完全不用动。**
+
+**方案 B：pbin patch**
 
 `client/party.js` 需要写进 `csgo/panorama/code.pbin` 内的
 `panorama/scripts/party.js`。
@@ -118,18 +136,28 @@ cmp /tmp/readback.js client/party.js
 
 如果打印的是 `patch FAILED`，说明 native API 对象是只读的，需要改为直接修改调用点。
 
-## 关于「从根上解决」：已确认此路不通
+**方案 A 的验证**看 `csgc_full.log`（csgo.exe 同级目录）：
 
-`MyPersonaAPI.GetElevatedState()` 的数据来源**已经逆向到底**，结论是**无法通过 GC 满足**：
+```
+[PRIME] client.dll appeared after 3900 ms
+[PRIME] elevation hook live: client.dll+0x6323f0 returns "elevated" (literal at client.dll+0xc76088)
+[PRIME] local-player prime hook installed (client.dll+0x632370)
+[PRIME] GetElevatedState: "none" -> "elevated"
+[PRIME] local-player prime predicate -> true
+```
+
+## 关于「从根上解决」：已完成（2026-09-28）
+
+`MyPersonaAPI.GetElevatedState()` 的调用链：
 
 ```
 GetElevatedState()                      // client.dll:0x63df6e 注册的 JS API
   -> 0x643de0                           // JS 包装：把状态字符串转成 JS 返回值
   -> 0x6323f0                           // 状态码 -> 字符串（jmp 跳转表）
   -> 0x632300                           // 计算状态码
-       mov ecx, [0x152a92f8]            // <- 客户端进程内的全局对象
-       mov ecx, [ecx + 0xb4]            //    取其成员
-       call 0x6cc520                    //    getter
+       mov ecx, [0x152a92f8]            // 全局单例（静态初始化，jmp 自 0xb33ac5）
+       mov ecx, [ecx + 0xb4]            // 取其成员
+       call 0x6cc520                    // ★ 在 SO 缓存里按键查找条目
        cmp [eax + 0x18], 5
        ...
 ```
@@ -145,11 +173,55 @@ GetElevatedState()                      // client.dll:0x63df6e 注册的 JS API
 | 5 | `eligible_with_takeover` |
 | 6 | **`elevated`** |
 
-关键在于：它读的是**客户端进程内的全局对象**（`0x152a92f8`，整个二进制里有 92 处引用），
-**不是任何一条 GC 消息**。也就是说，即使 GC 把 SO 缓存下得完全正确，也不会影响这个值 ——
-这解释了为什么「数据送达、客户端收下、但状态不变」。
+**关键在 `0x6cc520` —— 它是在 SO 缓存里按键查找条目：**
 
-**所以客户端侧的 API patch 不是权宜之计，而是当前唯一可行的路径。**
+```asm
+6cc533  mov eax, [esi + 0x10]      ; 缓存数组基址
+6cc536  mov [ebp-4], 7             ; ★ 查找 key = 7
+6cc559  cmp [eax + 0x20], 7        ; 条目 type == 7
+6cc563  cmp [eax + 0x18], 1        ; ★ 条目状态 == 1
+```
+
+**key = 7 正是 SO 类型里的 `CSOEconGameAccountClient`** —— 所以
+`GetElevatedState()` 的确是**从 SO 缓存读 type 7 的对象**，GC 侧这条方向从一开始就是对的。
+
+缺的是最后一步：客户端要求该条目 `[+0x18] == 1`。我们把对象下发过去了、客户端也收下了
+（不再重复请求刷新），但很可能**没有把这个条目标记成有效**，于是查找落空、状态停在默认值。
+
+> `[+0x18]` 的确切语义**尚未确认** —— 上面"条目状态"是我的推断，没有别的佐证。
+> 也可能是别的标志位。继续查的方向：看谁往 `[+0x18]` 写 1。
+
+**两条路**（当时的判断）：
+1. 补上"让条目变为有效"的那一步（若它由 GC 侧的某个消息驱动，就能真正从 GC 生效）
+2. 或者 csgc.dll hook `0x632300` / `0x6cc520`，直接返回 `elevated`
+
+### 已完成的解法
+
+第 2 条走通了，但突破点不是当初设想的 `0x632300` —— 它有个 `cmp eax, 5`
+的第二调用者 `0x59cf05`，动不得。真正的入口是它的姊妹函数 **`+0x6323F0`**：
+全二进制**唯一调用者 `0x643de9`**，正是 `GetElevatedState` 的 JS 包装。
+
+| 目标 | RVA | 做法 |
+|---|---|---|
+| 状态码 → 字符串 | `+0x6323F0` | 返回 `client.dll+0xC76088`（客户端自己的 `"elevated"` 字面量） |
+| 本地玩家 Prime 判定 | `+0x632370` | 返回 `true` |
+
+`+0x632370` 是两条同名 `GetFriendPrimeEligible`（`PartyListAPI` /
+`FriendsListAPI`）**本地玩家分支的共同尾调用目标**，所以一个 hook 就覆盖了
+两种 API；而「其他玩家」路径在到达它之前就已经分叉走了，完全不受影响。
+
+实测日志：
+
+```
+[PRIME] GetElevatedState: "none" -> "elevated"
+[PRIME] local-player prime predicate -> true
+```
+
+`"none"` 是 **native 的真实返回值** —— 这正是自制 GC 环境下优先状态全错的
+直接原因，也证明覆盖点抓准了。
+
+**完整分析、代码与集成步骤见 [`csgc-hook/`](csgc-hook/)。** 采用之后
+`client/party.js` 保持原样即可，`code.pbin` 不再需要任何修改。
 
 （附带发现：`0x632300` 里有一条 `-perfectworld` / `-forceperfectworld` 分支 ——
 中国版客户端的 elevated 判定走的是另一套逻辑。若将来要处理中国版，需另做分析。）
