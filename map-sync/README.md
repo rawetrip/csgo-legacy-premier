@@ -1,5 +1,30 @@
 # 选图 → 游戏服务器切图
 
+> ## ⚠️ 本文件已过时（2026-09-29）—— 先看这段
+>
+> **选/禁图（veto）和换图已经打通，而且不靠本文件描述的那套外部通道了。**
+>
+> 官方形态是：服务器**起点就是大厅图 `lobby_mapveto`**（由 `+map` 启动参数决定，
+> 不是 GC 下发的地图字段），玩家在大厅图里完成 BP，
+> **服务器进程里的 `Map veto pick controller` 实体自己 `changelevel` 到选中的图**。
+> 服务器日志实证：
+> ```
+> Map veto pick controller: pick = de_ancient
+> Map veto pick controller: initiating level transition to de_ancient
+> *** Map Load: de_ancient
+> ```
+>
+> 也就是说：**换图既不需要 GC 参与，也不需要 `server_map.txt`/`veto_map.txt`。**
+> 那两个文件 + `srvcmd.sh`（TIOCSTI）现在只剩「手动指定某张图」的兜底用途。
+>
+> 完整配方（启动参数 / srvfix 五补丁 / GC 侧改动）见
+> [`csgo-legacy-matchmaking`](https://github.com/rawetrip/csgo-legacy-matchmaking)
+> 的 README「★ 完整匹配流程：已打通」一节。
+>
+> 下面原文保留，作为**当时**的试错记录 —— 其中「srvfix v2 双补丁」的一节尤其要注意：
+> 现在是 **v3 五补丁**，而且 v2 那个 detour 桩**默认已关**（见下面的更正）。
+
+
 让「在比赛设置里选的图」真正落到游戏服务器上。
 
 ## 为什么不用「读 UI 选图」
@@ -70,7 +95,21 @@ py vmscp.py srvcmd.sh srvcmd.sh
 py vmssh.py "chmod +x srvcmd.sh"
 ```
 
-## veto 自动换图：srvfix v2 双补丁（已打通）
+## veto 自动换图：srvfix（**v3 五补丁**，v2 的描述已过时）
+
+> **更正**：本节原文描述的是 v2「双补丁」，其中 detour 桩默认已**关闭**。
+> v3 的五个补丁是：
+>
+> | 补丁 | 做法 |
+> |---|---|
+> | cookie 无条件放行 | `engine.so+0x1d07b0` 的 `je` → `jmp` |
+> | 换图 detour 桩 | **默认关**（`SRVFIX_DETOUR=1` 才开）—— 它让引擎自带的 `map <map> reserved` 真执行，但那会**从非主线程重载关卡**、卡死看门狗 |
+> | 桩页设可执行 | `mmap(PROT_READ\|PROT_WRITE)` 出来的页是 NX 的，跳进去必崩（`segfault at <mmap地址> ip <同一地址> error 15`） |
+> | NOP 掉 `Cbuf_Execute` | `site+0x0A` 那条 —— 命令已入队，让它交给主循环 flush |
+> | 抹掉无效模式名 `reserved` | 把 `"map %s reserved"` 里的 8 字节改成空格，拼出来就是 `map <地图>` |
+>
+> **默认是 NOP**（不执行引擎自带换图）；但打通完整流程后这句也不重要了 ——
+> 真正换图的是大厅图里的 `Map veto pick controller`。
 
 原本「能进服」和「会换图」互斥（`sv_lan 1` 能进服但不触发换图、`sv_lan 0` 换图触发但
 连接被 cookie 检查拒绝）。**srvfix v2 用两个补丁同时解决**，`srvfix.c` 就在本目录：

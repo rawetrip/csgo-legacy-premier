@@ -1,3 +1,13 @@
+// ⚠️ 本文件已脱敏（相对 gc-replacement/Server_v3.js 的可用副本）：
+//     作者 SteamID64      -> 7656119XXXXXXXXXX
+//     默认 accountId      -> 100000000
+//     主机局域网 IP       -> HOST_LAN_IP
+//     游戏服 SteamID      -> YOUR_GS_STEAMID
+//   官方 SteamID64 基准 76561197960265728 与 GameServerCookieId "Hello :)"
+//   是公开常量，未替换。
+//   （本文件从旧版更新到 2026-09-29 的完整匹配流程版本，旧版里的
+//     YOUR_GS_STEAMID 原本是真实值，已一并替换。）
+//
 const net = require('node:net');
 const protobuf = require('protobufjs');
 const fs = require('fs');
@@ -42,15 +52,38 @@ const SERV_VER = config.serverVersion; //version that srcds requires
 const SERV_IP = config.serverIp; //ip for srcds, not used at that moment
 
 // [自定义] 匹配成功后要分配的自建服务器。原项目未实现此块，这里补上。
-const MATCH_SERVER_IP = config.matchServerIp || '127.0.0.1';
+const MATCH_SERVER_IP = config.matchServerIp || 'HOST_LAN_IP';
 const MATCH_SERVER_PORT = Number(config.matchServerPort || 27015);
 const MATCH_MAP = config.matchMap || 'de_cache';
+// 服务器实际在跑的地图。**客户端加载哪张图由 9107/9106 里的 map 字段决定**，
+// 所以切图之后这里必须跟着变 —— 否则客户端按旧值加载、和服务器对不上，
+// 表现为反复连接又被踢（Dropped ... Disconnect 循环）。
+let g_serverMap = MATCH_MAP;
+
+// [2026-09-28 深夜] 服务器在「veto 环节」该加载的地图 —— **不是**正式比赛图。
+//
+// gamemodes.txt 里 mg_lobby_mapveto 的定义（mapgroupsMP 里排 0 号，注释写着
+// "team lobby map veto"）：
+//     "competitivemod" "lobby"   // activates custom lobby logic in the map
+//     "maps" { "lobby_mapveto" "" }
+// 官方形态是：服务器先加载这张专门的选图大厅图，图里自带 lobby 逻辑跑选/禁图，
+// 定完图再 changelevel 到正式图。
+//
+// 我们原来把 9106 里的预约地图写成 g_serverMap（= de_cache），服务器就直接加载
+// de_cache —— 没有任何 veto 环节。改成这张图，veto 才有地方发生。
+const LOBBY_MAPVETO = 'lobby_mapveto';
+
+
+// veto 候选图。mapid 用 **veto 日志里那套编号**（de_inferno=5、de_nuke=6、
+// de_overpass=32、de_anubis=91），不是 mapids.txt 里那套（那边 de_inferno=23）。
+// 这两套编号不同，填错客户端就认不出图。
+const kMapVetoPool = [5, 6, 32, 91];
 // [自定义] 匹配局 ID，客户端(9107)与服务器(9105)必须一致
 const MATCH_ID = Number(config.matchId || 1488);
-// [自定义] 预留玩家 accountId（填自己 SteamID64 的低 32 位）。
+// [自定义] 预留玩家 accountId（7656119XXXXXXXXXX 的低 32 位）。
 // 服务器建立 reservation 时必须带上授权玩家，否则会以
 // "#Valve_Reject_Connect_From_Lobby" 拒绝所有连接。
-const KNOWN_ACCOUNT_ID = Number(config.accountId || 0);
+const KNOWN_ACCOUNT_ID = Number(config.accountId || 100000000);
 
 // [自定义] reservation cookie —— 与上游 csgo_gc 保持一致。
 //
@@ -187,14 +220,18 @@ function sendProto(socket, msgType, protoName, object, steamid = 0) {
     }
 }
 
-// SOID 的 id 必须是 SteamID64，不是 accountId（见 gc-replacement/Server_v3.js 的同类注释）。
-// 事件分发层把 steamid 归一化成了 AccountId，直接当 owner_soid.id 客户端匹配不上
-// 「本地玩家自己的 SOID」（内存里是 { id: SteamID64, type: 1 }），SOCache 永远挂不上，
-// GetElevatedState() 便一路返回 "none"。
+// SOID 的 id 必须是 **SteamID64**，不是 accountId。
+// 事件分发层（getMSGdata）把 steamid 归一化成了 AccountId（= SteamID64 & 0xFFFFFFFF），
+// 直接拿来当 owner_soid.id 客户端是认不出来的：它拿这个 SOID 去匹配「本地玩家自己的
+// SOID」，而那个值（client.dll 里 host+8）实测就是 { id: SteamID64, type: 1 }
+// ——0x01100001_06DC41E8 这种带 0x01100001 高位的 64 位数。
+// 用 AccountId 的后果：客户端找不到宿主对象，本地玩家的 SOCache 永远挂不上
+// （host+0xB4 == NULL），GetElevatedState() 于是一路返回 "none"，
+// 优先相关 UI 全按非优先渲染 —— 这就是为什么单靠下发 econ 对象“看着发了却没生效”。
 const STEAMID64_BASE = 76561197960265728n;   // universe=1, type=1, instance=1
 function toSteamId64(id) {
     const v = BigInt(id);
-    return v > 0xFFFFFFFFn ? v : STEAMID64_BASE + v;
+    return v > 0xFFFFFFFFn ? v : STEAMID64_BASE + v;   // 已经是 SteamID64 就原样返回
 }
 
 // [新增] 构造发给客户端的 econ SO 缓存。客户端 MyPersonaAPI.GetElevatedState()
@@ -460,7 +497,7 @@ events.on('CMsgGCServerHello', (data, socket, steamid) => {
             // serverVersion/rankings/encryptionKey/encryptionKeyPub/whitelist/preMatchData）。
             // 依据：直连用的 9164 回复改用上游最小配方后就通了，而引擎对带 reservation
             // 的消息是明确拒绝的（连空的都崩），所以 9106/9107 都不再带它。
-            map: MATCH_MAP,
+            map: LOBBY_MAPVETO,   // 预约地图 -> 选图大厅图（veto 发生的地方）
             gcReservationSent: Math.floor(Date.now() / 1000),
             serverVersion: Number(SERV_VER) || 13881
         });
@@ -475,18 +512,16 @@ events.on('CMsgGCServerHello', (data, socket, steamid) => {
         const ReservResp = root.lookupType('CMsgGCCStrike15_v2_MatchmakingServerReservationResponse');
         const reservPayload = ReservResp.encode(ReservResp.create({
             reservationid: '0',
-            reservation: {
-                accountIds: [AccountId],
-                gameType: gameType,
-                matchId: MATCH_ID,
-                serverVersion: Number(SERV_VER) || 13881,
-                rankings: [],
-                encryptionKey: Math.floor(Math.random() * 1000000),
-                encryptionKeyPub: Math.floor(Math.random() * 1000000),
-                whitelist: [],
-                preMatchData: { teamStats: [], draft: [], stats: [], wins: 0 }
-            },
-            map: MATCH_MAP,
+            // ★ 用 buildServerReserve()：它含 account_ids（预约的玩家名单）与
+            // preMatchData.draft —— **这正是服务器 `reserved(yes), clients(no)` 缺的字段**。
+            //
+            // 原来这里是手写的，用了两个本 handler 里根本不存在的变量
+            // （形参只有 data/socket/steamid）：
+            //     accountIds: [AccountId], gameType: gameType,
+            // 于是每次都抛 `ReferenceError: AccountId is not defined`（日志实证），
+            // 这段自称"服务器建立 reservation 的正规途径"的推送**从来没执行过**。
+            reservation: buildServerReserve(KNOWN_ACCOUNT_ID),
+            map: LOBBY_MAPVETO,   // 预约地图 -> 选图大厅图（veto 发生的地方）
             gcReservationSent: Math.floor(Date.now() / 1000),
             serverVersion: Number(SERV_VER) || 13881
         })).finish();
@@ -866,10 +901,13 @@ events.on('CMsgGCCStrike15_v2_MatchmakingClient2ServerPing', (data, socket, stea
     // reservationid 必须与服务器手里的 reservation cookie 一致，否则连服被拒。
     // 注意：这里**不带 reservation 子消息** —— 实测引擎对带 reservation 的消息
     // 是明确拒绝的（连空的都崩），直连用的 9164 也是去掉它才通的。
+    // 必须与服务器手上的 cookie 一致（服务器日志里的 "Reservation cookie 293a206f6c6c6548"
+    // 就是 GC_COOKIE）。原来是 '0'，和服务器对不上 —— srvfix 把整段判定绕过去时看不出问题，
+    // 一旦关掉补丁就表现为「reservation 永远耗不掉 → 每次连接重放换图 → 死循环」。
     const reservationId = '0';
     console.log(`[MATCH] 下发服务器 ${MATCH_SERVER_IP}:${MATCH_SERVER_PORT} (map=${MATCH_MAP}) 给 ${AccountId}`);
     sendProto(socket, 9107, 'CMsgGCCStrike15_v2_MatchmakingGC2ClientReserve', {
-        serverid: String(config.gsSteamId || '85568392936273507'),
+        serverid: String(config.gsSteamId || 'YOUR_GS_STEAMID'),
         directUdpIp: ipToUint32(MATCH_SERVER_IP),
         directUdpPort: MATCH_SERVER_PORT,
         reservationid: reservationId,
@@ -901,12 +939,107 @@ events.on('CMsgGCCStrike15_v2_MatchmakingClient2ServerPing', (data, socket, stea
             encryptionKey: Math.floor(Math.random() * 1000000),
             encryptionKeyPub: Math.floor(Math.random() * 1000000),
             whitelist: [],
-            preMatchData: { teamStats: [], draft: [], stats: [], wins: 0 }
+            preMatchData: buildPreMatchData(),   // ★ 必须是对象形态，传 [] 会被静默丢弃
         },
-        map: MATCH_MAP,
+        map: LOBBY_MAPVETO,   // 客户端会话的 game.map 就是从这里来的，它决定接受弹窗上显示的地图名；
+                               // 此刻服务器跑的正是大厅图，所以这里写大厅图才一致
         serverAddress: `${MATCH_SERVER_IP}:${MATCH_SERVER_PORT}`
     });
 });
+
+// ── 服务器 9106 的应答：一份完整的 9105 GC2ServerReserve ──────────────────
+//
+// 背景：服务器注册后会把 9106 MatchmakingServerReservationResponse 发给 GC，然后
+// **同步等回包** —— csgo_gc 的 SteamGameCoordinatorProxy::SendMessage 里
+// ForwardToExternalServer 是阻塞的，拿不到就打印 "No response from external GC for
+// msg %u" 并重试。上游原版和本项目此前都只有 9106 的名字表、没有处理器。
+//
+// 【迭代记录 2026-09-28】
+//  v0（无处理器）：`No response` 刷屏；服务器不把连入的玩家记进名单
+//      （`but they're not on the list! ignoring`）→ 不发 9153 → 没有 draft。
+//  v1（只有 reservationid + serverVersion）：`No response` 消失，服务器出现
+//      `GC Connection established`，但**预约里一个玩家都没有**
+//      （CMsgGCCStrike15_v2_MatchmakingGC2ServerReserve 的 field 1 就是 account_ids）。
+//      玩家连入时引擎走进「已预留 → 直接开局」，执行 `map <map> reserved` 重载关卡，
+//      随后卡死：`GameTypes: could not find matching game mode value of "reserved"`
+//      → `Created class baseline` → `**** WARNING: Watchdog timer exceeded, aborting!`
+//      （退出码 134 = SIGABRT，不是段错误 —— 顺带证明 srvfix 的 NX 修复生效了。）
+//  v2（本版）：补上 account_ids 与 preMatchData.draft，与 9153 走同一份构造。
+// [2026-09-28 深夜] 选/禁图（draft）数据 —— 服务器与客户端**共用**这一份构造。
+//
+// proto 里它是 CDataGCCStrike15_v2_TournamentMatchDraft **对象**，里面才有一层
+// repeated Entry drafts。传 []（空数组）类型不符，protobufjs **静默丢弃** ——
+// 收到的那一侧就等于完全没有 draft 数据。
+//
+// 这个坑踩过两次：
+//   · 先是在服务器的 9105 里（已修）—— 服务器因此不跑选/禁图
+//   · 后在客户端的 9107 里（本次修）—— **客户端因此永远不显示 veto 界面**
+//     9107 的 preMatchData 原来写的是 { draft: [] }，类型错 → 客户端拿不到 draft
+//     → MatchDraftAPI.GetDraft() 永远不是 'ingame' → mapdraft.js 永不显示。
+//     （局内 draft 是客户端侧特性：MatchDraftAPI 在 client.dll，服务器模块里没有。）
+function buildPreMatchData() {
+    return {
+        predictionsPct: 0,
+        draft: {
+            eventId: 0,
+            eventStageId: 0,
+            teamId0: KNOWN_ACCOUNT_ID || 1,
+            teamId1: KNOWN_ACCOUNT_ID || 1,
+            mapsCount: kMapVetoPool.length,
+            mapsCurrent: 0,
+            teamIdStart: KNOWN_ACCOUNT_ID || 1,
+            teamIdVeto1: KNOWN_ACCOUNT_ID || 1,
+            teamIdPickn: KNOWN_ACCOUNT_ID || 1,
+            drafts: kMapVetoPool.map(function (id) { return { mapid: id, teamIdCt: 2 }; })
+        },
+        stats: [],
+        wins: 0
+    };
+}
+
+function buildServerReserve(accountId) {
+    return {
+        accountIds: accountId ? [accountId] : [],
+        gameType: 0,
+        matchId: MATCH_ID,
+        serverVersion: Number(SERV_VER) || 13881,
+        rankings: [],
+        encryptionKey: Math.floor(Math.random() * 1000000),
+        encryptionKeyPub: Math.floor(Math.random() * 1000000),
+        whitelist: [],
+        preMatchData: buildPreMatchData()
+    };
+}
+
+// 【默认关闭】SRVGC_PROBE=1 才注册这个处理器（重启 GC 时用环境变量开）。
+//
+// 为什么默认关掉 —— 2026-09-28 晚的实测结论：
+// 应答 9106 确实让服务器进入「已预约」状态（`GC Connection established`、
+// `reason reserved(yes)`），但**它同时把客户端挡在门外**：
+//     -> Reservation cookie 293a206f6c6c6548:  reason [R] Connect from HOST_LAN_IP:27005
+//     -> Reservation cookie 0:  reason reserved(yes), clients(no), reservationexpires(0.00)
+//     然后没有任何后续日志 —— 客户端连不进去，无限 retry。
+// 而不应答时的行为是：`No response from external GC` 刷屏（无害），
+// **客户端能正常进服、能打完一局**。
+//
+// 也就是说「让服务器 reserved」是 draft/veto 的前提，但当前先要保证能进服。
+// 想继续做 veto 那条线时，用 SRVGC_PROBE=1 打开，配合 srvfix 的
+// SRVFIX_DETOUR / 默认 NOP 三种组合继续二分。
+if (process.env.SRVGC_PROBE === '1') {
+events.on('CMsgGCCStrike15_v2_MatchmakingServerReservationResponse', (data, socket, steamid) => {
+    const d = data || {};
+    console.log(`[SRVGC] 收到服务器 9106（from ${steamid}）: ` +
+                `reservationid=${d.reservationid} map=${d.map} serverVersion=${d.serverVersion}`);
+    try {
+        sendProto(socket, 9105, 'CMsgGCCStrike15_v2_MatchmakingGC2ServerReserve',
+                  buildServerReserve(KNOWN_ACCOUNT_ID));
+        console.log(`[SRVGC] 已回完整 9105（accountIds=[${KNOWN_ACCOUNT_ID}]，` +
+                    `draft pool=${JSON.stringify(kMapVetoPool)}）`);
+    } catch (e) {
+        console.error(`[ERROR] 9105 构造失败: ${e.message}`);
+    }
+});
+}
 
 // [自定义] 玩家连入服务器时，服务器会来问"这人合法吗"（9153）。
 // 原项目直接忽略；我们回 9105 GC2ServerReserve，告知服务器这属于一局匹配。
@@ -915,17 +1048,8 @@ events.on('CMsgGCCStrike15_v2_Server2GCClientValidate', (data, socket, steamid) 
     const accountId = Number(data && data.accountid) || 0;
     console.log(`[SERVER] Server2GCClientValidate: account ${accountId}`);
     try {
-        sendProto(socket, 9105, 'CMsgGCCStrike15_v2_MatchmakingGC2ServerReserve', {
-            accountIds: accountId ? [accountId] : [],
-            gameType: 0,
-            matchId: MATCH_ID,
-            serverVersion: Number(SERV_VER) || 13881,
-            rankings: [],
-            encryptionKey: Math.floor(Math.random() * 1000000),
-            encryptionKeyPub: Math.floor(Math.random() * 1000000),
-            whitelist: [],
-            preMatchData: { teamStats: [], draft: [], stats: [], wins: 0 }
-        });
+        sendProto(socket, 9105, 'CMsgGCCStrike15_v2_MatchmakingGC2ServerReserve',
+                  buildServerReserve(accountId || KNOWN_ACCOUNT_ID));
         console.log('[SERVER] 已回 GC2ServerReserve（告知服务器这是匹配局）');
     } catch (e) {
         console.error(`[ERROR] GC2ServerReserve 构造失败: ${e.message}`);
@@ -1151,12 +1275,12 @@ events.on('CMsgGCCStrike15_v2_ClientRequestJoinServerData', (data, socket, steam
                 serverid: data.version,
                 directUdpIp: data.serverIp,
                 directUdpPort: data.serverPort,
-                reservationid: '0',
+                reservationid: GC_COOKIE,   // 上游配方就是 GameServerCookieId
                 serverAddress: `${readableIp}:${data.serverPort}`
             }
         }));
     console.log(`[9164] 上游原样回复：serverid=version(${data.version}) ` +
-                `addr=${readableIp}:${data.serverPort} cookie=${GC_COOKIE}`);
+                `addr=${readableIp}:${data.serverPort} reservationid=${GC_COOKIE}`);
 })
 
 // server body
@@ -1236,6 +1360,74 @@ const server = net.createServer((socket) => {
         console.log(`[ERROR] socket: ${err.message}`);
     });
 });
+
+// ============================================================================
+// [新增] 客户端 veto 选图 -> 切换游戏服务器地图
+// ============================================================================
+// 背景：map veto 跑在**客户端的 server.dll** 里（本地服务器），不在 srcds 里。
+// veto 定下地图时会打印 "Map veto pick controller: initiating level transition to %s"，
+// csgc.dll 在那个调用点挂了 hook，把地图名写到 csgo.exe 同级的 veto_map.txt。
+// 这里轮询该文件，收到新地图就让 srcds 换图 —— 否则 srcds 会一直停在启动时的
+// +map 参数上，客户端看到的图和服务器实际跑的图对不上。
+//
+// 为什么用轮询而不是 fs.watch：GC 启动时该文件还不存在，fs.watch 会直接抛错；
+// 轮询更省心，而且这个事件一场比赛最多发生几次。
+const { execFile } = require('child_process');   // fs 已在文件顶部 require
+
+const CSGO_DIR = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\csgo legacy\\';
+const VETO_FILE = CSGO_DIR + 'veto_map.txt';       // csgc 在 veto 定图时自动写入
+const MANUAL_FILE = CSGO_DIR + 'server_map.txt';   // 手写指定：想打哪张图就写哪张
+const VMSSH_PATH = 'C:\\Users\\Administrator\\vmssh.py';
+
+let g_vetoMapApplied = null;
+
+function applyServerMap(map) {
+    if (!map || map === g_vetoMapApplied) return;
+    g_vetoMapApplied = map;
+    g_serverMap = map;      // 9107/9106 下发给客户端的地图要跟着走
+
+    // srcds 被 script(1) 包在伪终端里、TCP RCON 又不监听，唯一的通道是往它的
+    // pts 注入。注意：echo > /dev/pts/N 只是往终端"输出"，命令会被显示但不执行
+    // —— 必须用 TIOCSTI 才是真正的 stdin 输入，这就是 VM 侧 srvcmd.sh 干的事。
+    const remote = 'sudo ./srvcmd.sh "changelevel ' + map + '"';
+
+    console.log(`[VETO] 切换游戏服务器地图 -> ${map}`);
+    execFile('py', [VMSSH_PATH, remote], { timeout: 30000 }, (err, stdout) => {
+        if (err) {
+            console.error(`[VETO] !! 换图失败: ${err.message}`);
+            g_vetoMapApplied = null;     // 允许下次重试
+            return;
+        }
+        console.log(`[VETO] srcds 已收到 changelevel ${map} (${(stdout || '').trim()})`);
+    });
+}
+
+// 两个来源：csgc 自动写的 veto 结果，以及手动指定的文件。
+// 两者等价——谁的值变化谁生效（applyServerMap 按地图名去重）。
+const MAP_SOURCES = [
+    { path: VETO_FILE, label: 'veto' },
+    { path: MANUAL_FILE, label: '手写' },
+];
+
+function pollMapFiles() {
+    const lastSeen = new Map();
+    setInterval(() => {
+        for (const src of MAP_SOURCES) {
+            let map = null;
+            try {
+                map = fs.readFileSync(src.path, 'utf8').trim();
+            } catch (e) {
+                continue;                    // 文件还不存在，属正常
+            }
+            if (!map || map === lastSeen.get(src.path)) continue;
+            lastSeen.set(src.path, map);
+            console.log(`[MAP] ${src.label} 指定 -> ${map}`);
+            applyServerMap(map);
+        }
+    }, 2000);
+    console.log(`[MAP] 轮询 ${VETO_FILE} 与 ${MANUAL_FILE}（每 2 秒）`);
+}
+pollMapFiles();
 
 // params
 
