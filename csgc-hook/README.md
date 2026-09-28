@@ -31,6 +31,9 @@
 **两者只需其一。** 采用本方案后 `party.js` 保持原样即可
 （`code.pbin` 里应当是 13497 字节的原始版本）。
 
+> 📌 上表比的是**做法**，不是某个文件。成品的 `client/party.js` 本仓库已不再分发 ——
+> 见 [`client/README.md`](../client/README.md)。
+
 ## 两个 hook 点
 
 全部 RVA 基于**构建 1575** 的 `client.dll`（16,377,192 字节，已核实）。

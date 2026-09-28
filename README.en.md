@@ -15,8 +15,8 @@ when running a custom Game Coordinator
 > ever return `"none"`.
 >
 > After fixing `owner_soid` (`toSteamId64()` in `gc/Server_v3.js`), native returns `"elevated"`
-> on its own — **neither the `csgc.dll` native hook nor the `client/party.js` JS patch is needed
-> anymore**. Both hooks under `csgc-hook/` are retired (code kept for rollback; see the top of
+> on its own — **neither the `csgc.dll` native hook nor the `party.js` JS patch inside `code.pbin`
+> is needed anymore**. Both hooks under `csgc-hook/` are retired (code kept for rollback; see the top of
 > `csgc-hook/README.md`).
 >
 > Every paragraph below that assumes "the client-side API data source cannot be located, so we
@@ -101,7 +101,7 @@ it at the client API layer.
 
 `csgc.dll` hooks two functions in `client.dll` directly and **modifies no game files**.
 
-**Option B (old): the JS patch in `client/party.js`**
+**Option B (old, deprecated): the JS patch to `party.js` inside `code.pbin`**
 
 Monkey-patches three native APIs to return Prime **for the local player only**:
 
@@ -119,6 +119,14 @@ Friends' Prime status stays truthful and is never mislabeled as Prime.
 > ⚠️ Do **not** use both options together. The JS patch replaces the native functions wholesale at
 > the JS layer, so csgc's hook will never be called — you will see no logs even though it is
 > installed.
+
+> ⚠️ **This repository no longer ships that `party.js`.** It is a modified copy of Valve's
+> `panorama/scripts/party.js`, and Valve has issued a DMCA notice precisely over "decompiled …
+> CS:GO javascript source code and layouts for Panorama UI" taken from `code.pbin`
+> ([github/dmca 2018-06-21](https://github.com/github/dmca/blob/master/2018/2018-06-21-Valve.md)).
+> The Prime JS fallback is obsolete anyway (Prime is now fixed on the GC side via `owner_soid`).
+> The same filename is still used by the **matchmaking** flow for the accept popup — generate
+> that copy from your own pristine file, see [`client/README.md`](client/README.md).
 
 ## Usage
 
@@ -151,23 +159,24 @@ Merge [`csgc-hook/prime_hook.cpp`](csgc-hook/prime_hook.cpp) into
 required modifications) are in [`csgc-hook/README.md`](csgc-hook/README.md).
 **`code.pbin` needs no changes at all.**
 
-**Option B: pbin patch**
+**Option B: pbin patch — generate it from your own pristine file; no ready-made copy is shipped**
 
-`client/party.js` must be written into `csgo/panorama/code.pbin` as
-`panorama/scripts/party.js`.
+```bash
+# 1. pull the pristine file out of YOUR code.pbin (game must be closed)
+py tools/pbin_tool.py get panorama/scripts/party.js party_orig.js   # expect 13497 bytes
+# 2. generate (script lives in csgo-legacy-matchmaking under tools/make_party.py)
+py tools/make_party.py party_orig.js party_patched.js               # expect 17464 bytes
+# 3. write back and verify
+py tools/pbin_tool.py put panorama/scripts/party.js party_patched.js
+py tools/pbin_tool.py get panorama/scripts/party.js readback.js
+cmp readback.js party_patched.js && echo OK
+```
 
 **The game must be closed while editing** — it reads resources into memory at startup, so
 editing with the game running has no effect.
 
-Always read back and verify after installing:
-
-```bash
-# write
-pbin_tool.py put panorama/scripts/party.js client/party.js
-# read back and byte-compare against the source
-pbin_tool.py get panorama/scripts/party.js /tmp/readback.js
-cmp /tmp/readback.js client/party.js
-```
+Why no ready-made copy, and what else depends on `party.js`:
+see [`client/README.md`](client/README.md).
 
 ## Verification
 
@@ -320,7 +329,7 @@ Measured logs:
 being wrong under a custom GC, and proof that the override point was correct.
 
 **Full analysis, code and integration steps are in [`csgc-hook/`](csgc-hook/).** With it
-applied, `client/party.js` can stay untouched and `code.pbin` needs no modification.
+applied, `party.js` can stay untouched and `code.pbin` needs no modification.
 
 ## Map selection → game server level change
 
@@ -357,3 +366,9 @@ GNU GPL 3.0.
 
 This project is a derivative work of [CSGO-GC-Replacement](https://github.com/aka3257/CSGO-GC-Replacement)
 (author aka3257, GPL 3.0); `gc/Server_v3.js` is modified from its `Server_v3.js`.
+
+**About `party.js` inside `code.pbin`:** it is a modified copy of **Valve Corporation's**
+`csgo/panorama/scripts/party.js`, copyright Valve, and is **not covered by this repository's
+GPL-3.0 licence**. This repository no longer ships a ready-made copy either — extract the
+pristine file from your own game installation and generate it with the script, see
+[`client/README.md`](client/README.md).

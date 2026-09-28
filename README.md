@@ -12,7 +12,7 @@
 > （host `+0xB4` 恒为 NULL），`GetElevatedState()` 于是只能返回 `"none"`。
 >
 > 修好 `owner_soid`（`gc/Server_v3.js` 里的 `toSteamId64()`）之后，native 自己就返回
-> `"elevated"` —— **`csgc.dll` 的 native hook 与 `client/party.js` 的 JS patch 都不再需要**。
+> `"elevated"` —— **`csgc.dll` 的 native hook 与 `code.pbin` 里 `party.js` 的 JS patch 都不再需要**。
 > `csgc-hook/` 下的两个 hook 已退役（代码保留可回退，见 `csgc-hook/README.md` 开头）。
 >
 > 下面凡是以「客户端 API 数据来源无法定位、只能绕过」为前提的段落，都是**当时**的结论，
@@ -83,7 +83,7 @@
 
 csgc.dll 直接 hook `client.dll` 的两个函数，**不改任何游戏文件**。
 
-**方案 B（旧）：`client/party.js` 的 JS patch**
+**方案 B（旧，已废弃）：`code.pbin` 里 `party.js` 的 JS patch**
 
 Monkey patch 三个 native API，**只对本地玩家**返回优先：
 
@@ -99,6 +99,13 @@ Monkey patch 三个 native API，**只对本地玩家**返回优先：
 
 > ⚠️ 两个方案**不要同时用**。JS patch 会在 JS 层把 native 函数整个替换掉，
 > 于是 csgc 的 hook 永远不会被调用 —— 装上了也看不到任何日志。
+
+> ⚠️ **本仓库不再分发那份 `party.js`。** 它是 Valve 的 `panorama/scripts/party.js`
+> 的修改版，而 Valve 2018 年正是为「从 `code.pbin` 反编译出来的 Panorama JS 与
+> layout」发过 DMCA（[github/dmca 2018-06-21](https://github.com/github/dmca/blob/master/2018/2018-06-21-Valve.md)）。
+> 何况 prime 的 JS 兜底已经废弃（现在靠 GC 侧修 `owner_soid`）。
+> 但同名文件**仍被匹配流程用于接受弹窗** —— 那一份请用你自己的原始件生成，
+> 见 [`client/README.md`](client/README.md)。
 
 ## 使用
 
@@ -131,22 +138,22 @@ node verify-socache.js <你的 SteamID64>
 完整步骤（含两处必要的改动）见 [`csgc-hook/README.md`](csgc-hook/README.md)。
 **`code.pbin` 完全不用动。**
 
-**方案 B：pbin patch**
+**方案 B：pbin patch —— 用你自己的原始件生成，本仓库不再提供成品**
 
-`client/party.js` 需要写进 `csgo/panorama/code.pbin` 内的
-`panorama/scripts/party.js`。
+```bash
+# 1. 从你自己的 code.pbin 取出原始件（游戏必须关着）
+py tools/pbin_tool.py get panorama/scripts/party.js party_orig.js   # 应为 13497 字节
+# 2. 生成（脚本在 csgo-legacy-matchmaking 的 tools/make_party.py）
+py tools/make_party.py party_orig.js party_patched.js               # 应为 17464 字节
+# 3. 写回 + 回读校验
+py tools/pbin_tool.py put panorama/scripts/party.js party_patched.js
+py tools/pbin_tool.py get panorama/scripts/party.js readback.js
+cmp readback.js party_patched.js && echo OK
+```
 
 **改的时候游戏必须关着** —— 游戏在启动时会把资源读进内存，开着游戏改等于没改。
 
-装完务必回读校验：
-
-```bash
-# 写入
-pbin_tool.py put panorama/scripts/party.js client/party.js
-# 回读并与源文件做字节比对
-pbin_tool.py get panorama/scripts/party.js /tmp/readback.js
-cmp /tmp/readback.js client/party.js
-```
+为什么不再提供成品、以及 `party.js` 还被谁依赖：见 [`client/README.md`](client/README.md)。
 
 ## 验证要点
 
@@ -314,3 +321,8 @@ GNU GPL 3.0。
 
 本项目是 [CSGO-GC-Replacement](https://github.com/aka3257/CSGO-GC-Replacement)
 （作者 aka3257，GPL 3.0）的衍生作品，`gc/Server_v3.js` 基于其 `Server_v3.js` 修改。
+
+**关于 `code.pbin` 里的 `party.js`：** 它是 **Valve Corporation** 的
+`csgo/panorama/scripts/party.js` 的修改版，版权归 Valve，**不在本仓库 GPL-3.0 的
+覆盖范围内**。本仓库亦**不再分发成品** —— 请从你自己的游戏里取出原始件、用生成脚本
+自行产出，见 [`client/README.md`](client/README.md)。

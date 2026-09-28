@@ -33,9 +33,14 @@
 修完后 native 自己就返回 `"elevated"`，**不需要任何客户端 hook**。
 
 **两个 native hook 已退役**（`csgc-src` 里 `kEnableNativePrimeHook = false`，代码保留可回退）。
-`code.pbin` 里 `party.js` 是**原始版**（13497 字节）——注意：本仓库的
-`client/party.js` 是**接受弹窗 + prime 的 JS 兜底**合用的一份（19898 字节），
-两者别搞混。
+prime 这一层**不需要任何 `party.js` 改动**。
+
+> 📌 **本次起，本仓库不再分发成品的 `client/party.js`。**
+> 它是 **Valve** 的 `panorama/scripts/party.js` 的修改版，而 Valve 2018 年正是为
+> 「从 `code.pbin` 反编译出来的 Panorama JS 与 layout」发过 DMCA
+> （[github/dmca 2018-06-21](https://github.com/github/dmca/blob/master/2018/2018-06-21-Valve.md)）。
+> 匹配流程要用的「接受弹窗」那一份，请用**你自己的原始件**生成 ——
+> 见 [`client/README.md`](client/README.md)（`13497 → 17464` 逐字节验证过）。
 
 > ⚠️ **踩过的坑**：prime 那条线为了 native hook 能被调用，一度把 `party.js` 还原成原始版。
 > 而 `party.js` 同时承载着**接受弹窗**（触发/音效/关闭）——于是 hook 退役后没人把它放回去，
