@@ -1,5 +1,7 @@
 # CS:GO Legacy 优先（Prime）匹配修复
 
+> **English version: [README.en.md](README.en.md)** ← 英文读者请看这里
+
 自建 GC（[CSGO-GC-Replacement](https://github.com/aka3257/CSGO-GC-Replacement)）环境下，
 让 CS:GO Legacy 客户端正确显示「优先状态」的修复补丁集。
 
